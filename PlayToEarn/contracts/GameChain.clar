@@ -149,3 +149,99 @@
                                 (ok "Asset traded successfully"))
                             error (err u117))))
             (err u118)))) ;; Asset not found
+
+;; Function to lock tokens (for outgoing transfers)
+(define-public (lock-tokens (token-amount uint) (destination-chain principal))
+    (begin
+        (asserts! (not (var-get contract-paused)) (err u119))
+        (asserts! (<= token-amount (var-get tokens-held)) (err u120)) ;; Ensure sufficient tokens
+        (asserts! (is-valid-principal destination-chain) (err u121)) ;; Check if destination-chain is a valid principal
+        (if (and (is-owner) (has-role tx-sender "admin"))
+            (begin
+                (var-set tokens-held (- (var-get tokens-held) token-amount))
+                (print {event: "Lock", amount: token-amount, destination: destination-chain})
+                (ok "Tokens locked and ready for cross-chain transfer"))
+            (err u122))))
+
+;; Function to unlock or mint tokens (for incoming transfers)
+(define-public (mint-tokens-for-player (token-amount uint) (origin-chain principal))
+    (begin
+        (asserts! (not (var-get contract-paused)) (err u123))
+        (asserts! (<= token-amount u1000000) (err u124)) ;; Limit minting amount
+        (asserts! (is-valid-principal origin-chain) (err u125)) ;; Check if origin-chain is a valid principal
+        (if (and (is-owner) (has-role tx-sender "admin"))
+            (begin
+                (var-set tokens-held (+ (var-get tokens-held) token-amount))
+                (print {event: "Mint", amount: token-amount, origin: origin-chain})
+                (ok "Tokens unlocked/minted successfully"))
+            (err u126))))
+
+;; Time-Locked Withdrawal Functions
+(define-public (lock-tokens-with-time (amount uint) (unlock-time uint))
+    (begin
+        (asserts! (<= amount (var-get tokens-held)) (err u127)) ;; Ensure sufficient tokens
+        (asserts! (> unlock-time block-height) (err u128)) ;; Ensure future unlock time
+        (var-set tokens-held (- (var-get tokens-held) amount))
+        (map-set time-locked-balances {owner: tx-sender} {unlock-time: unlock-time, amount: amount})
+        (ok "Tokens time-locked successfully")))
+
+(define-public (withdraw-time-locked-tokens)
+    (match (map-get? time-locked-balances {owner: tx-sender})
+        balance
+            (if (>= block-height (get unlock-time balance))
+                (begin
+                    (var-set tokens-held (+ (var-get tokens-held) (get amount balance)))
+                    (map-delete time-locked-balances {owner: tx-sender})
+                    (ok "Tokens withdrawn successfully"))
+                (err u129))
+        (err u130))) ;; No time-locked balance found
+
+;; Automatic Transaction Reversal Functions
+(define-public (initiate-conditional-transfer (amount uint) (recipient principal) (deadline uint))
+    (begin
+        (asserts! (is-valid-principal recipient) (err u131)) ;; Check if recipient is a valid principal
+        (asserts! (<= amount (var-get tokens-held)) (err u132)) ;; Ensure sufficient tokens
+        (asserts! (> deadline block-height) (err u133)) ;; Ensure future deadline
+        (var-set tokens-held (- (var-get tokens-held) amount))
+        (map-set pending-transactions {sender: tx-sender} {amount: amount, recipient: recipient, deadline: deadline})
+        (ok "Conditional transfer initiated")))
+
+(define-public (complete-transaction)
+    (match (map-get? pending-transactions {sender: tx-sender})
+        tx
+            (if (<= block-height (get deadline tx))
+                (begin
+                    (map-delete pending-transactions {sender: tx-sender})
+                    (ok "Transaction completed successfully"))
+                (begin
+                    (var-set tokens-held (+ (var-get tokens-held) (get amount tx)))
+                    (map-delete pending-transactions {sender: tx-sender})
+                    (err u134))) ;; Transaction deadline passed, funds returned
+        (err u135))) ;; No pending transaction found
+
+;; Function to check if the timelock has expired
+(define-private (is-expired (lock-time uint))
+    (> block-height lock-time))
+
+;; Function to check the number of tokens currently held
+(define-read-only (check-tokens-held)
+    (var-get tokens-held))
+
+;; Emergency stop functions
+(define-public (pause-contract)
+    (begin
+        (asserts! (is-owner) (err u136))
+        (var-set contract-paused true)
+        (ok "Contract paused")))
+
+(define-public (resume-contract)
+    (begin
+        (asserts! (is-owner) (err u137))
+        (var-set contract-paused false)
+        (ok "Contract resumed")))
+
+;; Helper function to check if a principal is valid
+(define-private (is-valid-principal (address principal))
+    (match (principal-destruct? address)
+        success true
+        error false))
